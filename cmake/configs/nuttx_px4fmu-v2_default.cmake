@@ -40,13 +40,13 @@ set(config_module_list
 	drivers/frsky_telemetry
 	modules/sensors
 	#drivers/mkblctrl
-	drivers/px4flow
+	#drivers/px4flow
 	#drivers/oreoled
-	drivers/gimbal
+	#drivers/gimbal
 	drivers/pwm_input
-	drivers/camera_trigger
+	#drivers/camera_trigger
 	drivers/bst
-	drivers/snapdragon_rc_pwm
+	#drivers/snapdragon_rc_pwm
 	drivers/lis3mdl
 
 	#
@@ -102,14 +102,19 @@ set(config_module_list
 	modules/local_position_estimator
 	modules/ekf2
 
+	#custom
+	modules/impact_detection
+	modules/impact_characterization
+	modules/recovery_stage
+
 	#
 	# Vehicle Control
 	#
-	modules/fw_pos_control_l1
-	modules/fw_att_control
+	#modules/fw_pos_control_l1
+	#modules/fw_att_control
 	modules/mc_att_control
 	modules/mc_pos_control
-	modules/vtol_att_control
+	#modules/vtol_att_control
 
 	#
 	# Logging
@@ -142,6 +147,7 @@ set(config_module_list
 	lib/runway_takeoff
 	lib/tailsitter_recovery
 	lib/DriverFramework/framework
+	lib/eFLL
 	platforms/nuttx
 
 	# had to add for cmake, not sure why wasn't in original config

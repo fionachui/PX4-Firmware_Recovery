@@ -88,10 +88,6 @@
 #include <lib/mathlib/mathlib.h>
 #include <lib/geo/geo.h>
 #include <lib/tailsitter_recovery/tailsitter_recovery.h>
-//custom	
-#include <uORB/topics/impact_recovery_stage.h>		
-#include <uORB/topics/impact_characterization.h>		
-#include <uORB/topics/recovery_control.h>
 
 /**
  * Multicopter attitude control app start / stop handling function
@@ -146,15 +142,9 @@ private:
 	int		_vehicle_status_sub;	/**< vehicle status subscription */
 	int 	_motor_limits_sub;		/**< motor limits subscription */
 
-	//custom	
-	int 	_recovery_stage_sub;		
-	int 	_characterization_sub;
-
 	orb_advert_t	_v_rates_sp_pub;		/**< rate setpoint publication */
 	orb_advert_t	_actuators_0_pub;		/**< attitude actuator controls publication */
 	orb_advert_t	_controller_status_pub;	/**< controller status publication */
-	//custom
-	orb_advert_t	_recovery_control_pub;	
 
 	orb_id_t _rates_sp_id;	/**< pointer to correct rates setpoint uORB metadata structure */
 	orb_id_t _actuators_id;	/**< pointer to correct actuator controls0 uORB metadata structure */
@@ -171,11 +161,6 @@ private:
 	struct vehicle_status_s				_vehicle_status;	/**< vehicle status */
 	struct multirotor_motor_limits_s	_motor_limits;		/**< motor limits */
 	struct mc_att_ctrl_status_s 		_controller_status; /**< controller status */
-
-	//custom	
-	struct impact_recovery_stage_s 	    _recovery_stage;		
-	struct impact_characterization_s    _characterization;		
-	struct recovery_control_s           _recovery_control;
 
 	perf_counter_t	_loop_perf;			/**< loop performance counter */
 	perf_counter_t	_controller_latency_perf;
@@ -302,12 +287,6 @@ private:
 	 */
 	void		vehicle_motor_limits_poll();
 
-	//custom
-	/**
-	 * Check for impact detection and characterization updates		
-	 */		
-	void 		impact_poll();		
-
 	/**
 	 * Shim for calling task_main from task_create.
 	 */
@@ -338,16 +317,11 @@ MulticopterAttitudeControl::MulticopterAttitudeControl() :
 	_manual_control_sp_sub(-1),
 	_armed_sub(-1),
 	_vehicle_status_sub(-1),
-	//custom	
-	_recovery_stage_sub(-1),		
-	_characterization_sub(-1),
 
 	/* publications */
 	_v_rates_sp_pub(nullptr),
 	_actuators_0_pub(nullptr),
 	_controller_status_pub(nullptr),
-	//custom
-	_recovery_control_pub(nullptr),	
 	_rates_sp_id(0),
 	_actuators_id(0),
 
@@ -369,10 +343,6 @@ MulticopterAttitudeControl::MulticopterAttitudeControl() :
 	memset(&_vehicle_status, 0, sizeof(_vehicle_status));
 	memset(&_motor_limits, 0, sizeof(_motor_limits));
 	memset(&_controller_status, 0, sizeof(_controller_status));
-	//custom	
-	memset(&_recovery_stage_sub, 0, sizeof(_recovery_stage_sub));		
-	memset(&_characterization_sub, 0, sizeof(_characterization_sub));		
-	memset(&_recovery_control, 0, sizeof(_recovery_control));
 	_vehicle_status.is_rotary_wing = true;
 
 	_params.att_p.zero();
@@ -673,22 +643,6 @@ MulticopterAttitudeControl::vehicle_motor_limits_poll()
 	}
 }
 
-void		
-MulticopterAttitudeControl::impact_poll()		
-{		
-	bool updated_recovery_stage;		
-	bool updated_characterization;		
-	orb_check(_recovery_stage_sub, &updated_recovery_stage);		
-	orb_check(_characterization_sub, &updated_characterization);		
-	if (updated_recovery_stage){		
-		orb_copy(ORB_ID(impact_recovery_stage), _recovery_stage_sub, &_recovery_stage);	
-		//PX4_WARN("Yea, it's copying\n");	
-	}		
-	if (updated_characterization){		
-		orb_copy(ORB_ID(impact_characterization), _characterization_sub, &_characterization);		
-	}		
-}
-
 /**
  * Attitude controller.
  * Input: 'vehicle_attitude_setpoint' topics (depending on mode)
@@ -699,177 +653,101 @@ MulticopterAttitudeControl::control_attitude(float dt)
 {
 	vehicle_attitude_setpoint_poll();
 
-	//PX4_WARN("%u\n",_recovery_stage.recoveryStage);
+	_thrust_sp = _v_att_sp.thrust;
 
-	if (_recovery_stage.recoveryStage > 0) {
-		PX4_WARN("RECOVERY STAGE NOT ZERO: %u \n",_recovery_stage.recoveryStage);
+	/* construct attitude setpoint rotation matrix */
+	math::Matrix<3, 3> R_sp;
+	R_sp.set(_v_att_sp.R_body);
 
-		math::Vector<3> accelReference(_characterization.accelReference[0],_characterization.accelReference[1], _characterization.accelReference[2]);
-		float HOVER_THRUST = 0.24f;//param_find("HOVER_THRUST");
+	/* get current rotation matrix from control state quaternions */
+	math::Quaternion q_att(_ctrl_state.q[0], _ctrl_state.q[1], _ctrl_state.q[2], _ctrl_state.q[3]);
+	math::Matrix<3, 3> R = q_att.to_dcm();
 
-		if(_recovery_stage.recoveryStage == 1){
-			_thrust_sp = HOVER_THRUST; // set to hover thrust for initial recovery stage
-		}
-		else if(_recovery_stage.recoveryStage == 2){
-			_thrust_sp = HOVER_THRUST;
-			//_thrust_sp = _v_att_sp.thrust;//set thrust to altitude w/ zero setpoint
-			accelReference.zero();
-		}    		
-		else{
-			PX4_WARN("Something is terribly wrong.");
-		}
+	/* all input data is ready, run controller itself */
 
-		math::Quaternion attitudeQuaternion(_ctrl_state.q[0], _ctrl_state.q[1], _ctrl_state.q[2], _ctrl_state.q[3]);
-		
-		math::Vector<3> rates; // these are the measured body rates
-		rates(0) = _ctrl_state.roll_rate;
-		rates(1) = _ctrl_state.pitch_rate;
-		rates(2) = _ctrl_state.yaw_rate;
+	/* try to move thrust vector shortest way, because yaw response is slower than roll/pitch */
+	math::Vector<3> R_z(R(0, 2), R(1, 2), R(2, 2));
+	math::Vector<3> R_sp_z(R_sp(0, 2), R_sp(1, 2), R_sp(2, 2));
 
-		math::Vector<3> gravity(0.0f, 0.0f, 9.81f);
-		math::Vector<3> accelDesired = accelReference + gravity;
-		math::Quaternion zAxisAppended(0.0f, 0.0f, 0.0f, 1.0f);
-		math::Quaternion bodyZAppended = ((attitudeQuaternion * zAxisAppended) * attitudeQuaternion.inversed());
-		math::Vector<3> bodyZ(bodyZAppended(1), bodyZAppended(2), bodyZAppended(3));
-		math::Vector<3> bodyZDesired = accelDesired.normalized();
-		// equation (11)
-		float alpha = acosf(bodyZ(0)*bodyZDesired(0) + bodyZ(1)*bodyZDesired(1) + bodyZ(2)*bodyZDesired(2));	
-		//compute axis of rotation in world frame
-	    math::Vector<3> axis(bodyZ(1)*bodyZDesired(2) - bodyZ(2)*bodyZDesired(1), \
-					      bodyZ(2)*bodyZDesired(0) - bodyZ(0)*bodyZDesired(2), \
-					      bodyZ(0)*bodyZDesired(1) - bodyZ(1)*bodyZDesired(0));
-	    //to be safe
-	    axis.normalize();
-	    //rotate into body frame
-	    math::Quaternion axisAppended(0.0f, axis(0), axis(1), axis(2));
-	    math::Quaternion axisBodyAppended = ((attitudeQuaternion.inversed() * axisAppended) * attitudeQuaternion);
-	    math::Vector<3>  axisBody(axisBodyAppended(1), axisBodyAppended(2), axisBodyAppended(3));
-	    // compute roll pitch error quaternion
-		math::Quaternion rollPitchQuaternionError(cosf(alpha/2), axisBody(0)*sinf(alpha/2), \
-	    							axisBody(1)*sinf(alpha/2), axisBody(2)*sinf(alpha/2));
+	/* axis and sin(angle) of desired rotation */
+	math::Vector<3> e_R = R.transposed() * (R_z % R_sp_z);
 
-		_recovery_control.quatError[0] = rollPitchQuaternionError(0);
-		_recovery_control.quatError[1] = rollPitchQuaternionError(1);
-		_recovery_control.quatError[2] = rollPitchQuaternionError(2);
-		_recovery_control.quatError[3] = rollPitchQuaternionError(3);
+	/* calculate angle error */
+	float e_R_z_sin = e_R.length();
+	float e_R_z_cos = R_z * R_sp_z;
 
-		//proportional constant for aggressiveness of recovery
-		float BODY_RATE_GAIN = 15.0f;//param_find("BODY_RATE_GAIN");
+	/* calculate weight for yaw control */
+	float yaw_w = R_sp(2, 2) * R_sp(2, 2);
 
-		float bodyRate_P_Desired = BODY_RATE_GAIN * rollPitchQuaternionError(1);
-		float bodyRate_Q_Desired = BODY_RATE_GAIN * rollPitchQuaternionError(2);
+	/* calculate rotation matrix after roll/pitch only rotation */
+	math::Matrix<3, 3> R_rp;
 
-		if (rollPitchQuaternionError(0) < 0.0f){
-	    	bodyRate_P_Desired = -1*bodyRate_P_Desired;
-	    	bodyRate_Q_Desired = -1*bodyRate_Q_Desired;
-	    }
-		float bodyRate_R_Desired = 0.0f;
-		// these are the desired body rates
-		math::Vector<3> bodyRates(bodyRate_P_Desired, bodyRate_Q_Desired, bodyRate_R_Desired);
-		_rates_sp = bodyRates;
+	if (e_R_z_sin > 0.0f) {
+		/* get axis-angle representation */
+		float e_R_z_angle = atan2f(e_R_z_sin, e_R_z_cos);
+		math::Vector<3> e_R_z_axis = e_R / e_R_z_sin;
 
-		_recovery_control.bodyRatesDesired[0] = bodyRate_P_Desired;
-		_recovery_control.bodyRatesDesired[1] = bodyRate_Q_Desired;
-		_recovery_control.bodyRatesDesired[2] = bodyRate_R_Desired;
+		e_R = e_R_z_axis * e_R_z_angle;
 
+		/* cross product matrix for e_R_axis */
+		math::Matrix<3, 3> e_R_cp;
+		e_R_cp.zero();
+		e_R_cp(0, 1) = -e_R_z_axis(2);
+		e_R_cp(0, 2) = e_R_z_axis(1);
+		e_R_cp(1, 0) = e_R_z_axis(2);
+		e_R_cp(1, 2) = -e_R_z_axis(0);
+		e_R_cp(2, 0) = -e_R_z_axis(1);
+		e_R_cp(2, 1) = e_R_z_axis(0);
+
+		/* rotation matrix for roll/pitch only rotation */
+		R_rp = R * (_I + e_R_cp * e_R_z_sin + e_R_cp * e_R_cp * (1.0f - e_R_z_cos));
+
+	} else {
+		/* zero roll/pitch rotation */
+		R_rp = R;
 	}
-	else{
-		_thrust_sp = _v_att_sp.thrust;
 
-		/* construct attitude setpoint rotation matrix */
-		math::Matrix<3, 3> R_sp;
-		R_sp.set(_v_att_sp.R_body);
+	/* R_rp and R_sp has the same Z axis, calculate yaw error */
+	math::Vector<3> R_sp_x(R_sp(0, 0), R_sp(1, 0), R_sp(2, 0));
+	math::Vector<3> R_rp_x(R_rp(0, 0), R_rp(1, 0), R_rp(2, 0));
+	e_R(2) = atan2f((R_rp_x % R_sp_x) * R_sp_z, R_rp_x * R_sp_x) * yaw_w;
 
-		/* get current rotation matrix from control state quaternions */
-		math::Quaternion q_att(_ctrl_state.q[0], _ctrl_state.q[1], _ctrl_state.q[2], _ctrl_state.q[3]);
-		math::Matrix<3, 3> R = q_att.to_dcm();
+	if (e_R_z_cos < 0.0f) {
+		/* for large thrust vector rotations use another rotation method:
+		 * calculate angle and axis for R -> R_sp rotation directly */
+		math::Quaternion q_error;
+		q_error.from_dcm(R.transposed() * R_sp);
+		math::Vector<3> e_R_d = q_error(0) >= 0.0f ? q_error.imag()  * 2.0f: -q_error.imag() * 2.0f;
 
-		/* all input data is ready, run controller itself */
+		/* use fusion of Z axis based rotation and direct rotation */
+		float direct_w = e_R_z_cos * e_R_z_cos * yaw_w;
+		e_R = e_R * (1.0f - direct_w) + e_R_d * direct_w;
+	}
 
-		/* try to move thrust vector shortest way, because yaw response is slower than roll/pitch */
-		math::Vector<3> R_z(R(0, 2), R(1, 2), R(2, 2));
-		math::Vector<3> R_sp_z(R_sp(0, 2), R_sp(1, 2), R_sp(2, 2));
+	/* calculate angular rates setpoint */
+	_rates_sp = _params.att_p.emult(e_R);
 
-		/* axis and sin(angle) of desired rotation */
-		math::Vector<3> e_R = R.transposed() * (R_z % R_sp_z);
-
-		/* calculate angle error */
-		float e_R_z_sin = e_R.length();
-		float e_R_z_cos = R_z * R_sp_z;
-
-		/* calculate weight for yaw control */
-		float yaw_w = R_sp(2, 2) * R_sp(2, 2);
-
-		/* calculate rotation matrix after roll/pitch only rotation */
-		math::Matrix<3, 3> R_rp;
-
-		if (e_R_z_sin > 0.0f) {
-			/* get axis-angle representation */
-			float e_R_z_angle = atan2f(e_R_z_sin, e_R_z_cos);
-			math::Vector<3> e_R_z_axis = e_R / e_R_z_sin;
-
-			e_R = e_R_z_axis * e_R_z_angle;
-
-			/* cross product matrix for e_R_axis */
-			math::Matrix<3, 3> e_R_cp;
-			e_R_cp.zero();
-			e_R_cp(0, 1) = -e_R_z_axis(2);
-			e_R_cp(0, 2) = e_R_z_axis(1);
-			e_R_cp(1, 0) = e_R_z_axis(2);
-			e_R_cp(1, 2) = -e_R_z_axis(0);
-			e_R_cp(2, 0) = -e_R_z_axis(1);
-			e_R_cp(2, 1) = e_R_z_axis(0);
-
-			/* rotation matrix for roll/pitch only rotation */
-			R_rp = R * (_I + e_R_cp * e_R_z_sin + e_R_cp * e_R_cp * (1.0f - e_R_z_cos));
+	/* limit rates */
+	for (int i = 0; i < 3; i++) {
+		if ((_v_control_mode.flag_control_velocity_enabled || _v_control_mode.flag_control_auto_enabled) &&
+		    !_v_control_mode.flag_control_manual_enabled) {
+			_rates_sp(i) = math::constrain(_rates_sp(i), -_params.auto_rate_max(i), _params.auto_rate_max(i));
 
 		} else {
-			/* zero roll/pitch rotation */
-			R_rp = R;
+			_rates_sp(i) = math::constrain(_rates_sp(i), -_params.mc_rate_max(i), _params.mc_rate_max(i));
 		}
+	}
 
-		/* R_rp and R_sp has the same Z axis, calculate yaw error */
-		math::Vector<3> R_sp_x(R_sp(0, 0), R_sp(1, 0), R_sp(2, 0));
-		math::Vector<3> R_rp_x(R_rp(0, 0), R_rp(1, 0), R_rp(2, 0));
-		e_R(2) = atan2f((R_rp_x % R_sp_x) * R_sp_z, R_rp_x * R_sp_x) * yaw_w;
+	/* feed forward yaw setpoint rate */
+	_rates_sp(2) += _v_att_sp.yaw_sp_move_rate * yaw_w * _params.yaw_ff;
 
-		if (e_R_z_cos < 0.0f) {
-			/* for large thrust vector rotations use another rotation method:
-			 * calculate angle and axis for R -> R_sp rotation directly */
-			math::Quaternion q_error;
-			q_error.from_dcm(R.transposed() * R_sp);
-			math::Vector<3> e_R_d = q_error(0) >= 0.0f ? q_error.imag()  * 2.0f: -q_error.imag() * 2.0f;
-
-			/* use fusion of Z axis based rotation and direct rotation */
-			float direct_w = e_R_z_cos * e_R_z_cos * yaw_w;
-			e_R = e_R * (1.0f - direct_w) + e_R_d * direct_w;
-		}
-
-		/* calculate angular rates setpoint */
-		_rates_sp = _params.att_p.emult(e_R);
-
-		/* limit rates */
-		for (int i = 0; i < 3; i++) {
-			if ((_v_control_mode.flag_control_velocity_enabled || _v_control_mode.flag_control_auto_enabled) &&
-			    !_v_control_mode.flag_control_manual_enabled) {
-				_rates_sp(i) = math::constrain(_rates_sp(i), -_params.auto_rate_max(i), _params.auto_rate_max(i));
-
-			} else {
-				_rates_sp(i) = math::constrain(_rates_sp(i), -_params.mc_rate_max(i), _params.mc_rate_max(i));
-			}
-		}
-
-		/* feed forward yaw setpoint rate */
-		_rates_sp(2) += _v_att_sp.yaw_sp_move_rate * yaw_w * _params.yaw_ff;
-
-		/* weather-vane mode, dampen yaw rate */
-		if ((_v_control_mode.flag_control_velocity_enabled || _v_control_mode.flag_control_auto_enabled) &&
-		    _v_att_sp.disable_mc_yaw_control == true && !_v_control_mode.flag_control_manual_enabled) {
-			float wv_yaw_rate_max = _params.auto_rate_max(2) * _params.vtol_wv_yaw_rate_scale;
-			_rates_sp(2) = math::constrain(_rates_sp(2), -wv_yaw_rate_max, wv_yaw_rate_max);
-			// prevent integrator winding up in weathervane mode
-			_rates_int(2) = 0.0f;
-		}
+	/* weather-vane mode, dampen yaw rate */
+	if ((_v_control_mode.flag_control_velocity_enabled || _v_control_mode.flag_control_auto_enabled) &&
+	    _v_att_sp.disable_mc_yaw_control == true && !_v_control_mode.flag_control_manual_enabled) {
+		float wv_yaw_rate_max = _params.auto_rate_max(2) * _params.vtol_wv_yaw_rate_scale;
+		_rates_sp(2) = math::constrain(_rates_sp(2), -wv_yaw_rate_max, wv_yaw_rate_max);
+		// prevent integrator winding up in weathervane mode
+		_rates_int(2) = 0.0f;
 	}
 }
 
@@ -893,20 +771,10 @@ MulticopterAttitudeControl::control_attitude_rates(float dt)
 	rates(1) = _ctrl_state.pitch_rate;
 	rates(2) = _ctrl_state.yaw_rate;
 
-	math::Vector<3> recovery_scale_D;
-	recovery_scale_D(0) = 1.2f;
-	recovery_scale_D(1) = 1.2f;
-	recovery_scale_D(2) = 1.0f;
-
 	/* angular rates error */
 	math::Vector<3> rates_err = _rates_sp - rates;
-
-	if(_recovery_stage.recoveryStage > 0){
-		_att_control = _params.rate_p.emult(rates_err) + recovery_scale_D.emult(_params.rate_d.emult(_rates_prev - rates)) / dt;
-	} else {
-		_att_control = _params.rate_p.emult(rates_err) + _params.rate_d.emult(_rates_prev - rates) / dt + _rates_int + _params.rate_ff.emult(_rates_sp - _rates_sp_prev) / dt;
-    }
-
+	_att_control = _params.rate_p.emult(rates_err) + _params.rate_d.emult(_rates_prev - rates) / dt + _rates_int +
+		       _params.rate_ff.emult(_rates_sp - _rates_sp_prev) / dt;
 	_rates_sp_prev = _rates_sp;
 	_rates_prev = rates;
 
@@ -950,10 +818,6 @@ MulticopterAttitudeControl::task_main()
 	_armed_sub = orb_subscribe(ORB_ID(actuator_armed));
 	_vehicle_status_sub = orb_subscribe(ORB_ID(vehicle_status));
 	_motor_limits_sub = orb_subscribe(ORB_ID(multirotor_motor_limits));
-
-	//custom
-    _recovery_stage_sub = orb_subscribe(ORB_ID(impact_recovery_stage));
-    _characterization_sub = orb_subscribe(ORB_ID(impact_characterization));
 
 	/* initialize parameters cache */
 	parameters_update();
@@ -1008,8 +872,6 @@ MulticopterAttitudeControl::task_main()
 			vehicle_manual_poll();
 			vehicle_status_poll();
 			vehicle_motor_limits_poll();
-			//custom
-			impact_poll();
 
 			/* Check if we are in rattitude mode and the pilot is above the threshold on pitch
 			 * or roll (yaw can rotate 360 in normal att control).  If both are true don't
@@ -1124,14 +986,6 @@ MulticopterAttitudeControl::task_main()
 
 				} else {
 					_controller_status_pub = orb_advertise(ORB_ID(mc_att_ctrl_status), &_controller_status);
-				}
-
-				//custom
-				if (_recovery_control_pub != nullptr) {		
-					orb_publish(ORB_ID(recovery_control), _recovery_control_pub, &_recovery_control);		
-				}		
-				else{		
-					_recovery_control_pub = orb_advertise(ORB_ID(recovery_control), &_recovery_control);
 				}
 			}
 		}

@@ -37,3 +37,9 @@ mc_pos_control start
 # Start Land Detector
 #
 land_detector start multicopter
+
+impact_detection start
+
+impact_characterization start
+
+recovery_stage start

@@ -117,6 +117,11 @@ set(msg_file_names
 	vision_position_estimate.msg
 	vtol_vehicle_status.msg
 	wind_estimate.msg
+	impact_detection.msg
+	impact_characterization.msg
+	impact_recovery_stage.msg
+	recovery_control.msg
+	debug.msg
 	)
 
 # Get absolute paths

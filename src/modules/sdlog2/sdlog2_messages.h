@@ -646,6 +646,70 @@ struct log_PARM_s {
 	char name[16];
 	float value;
 };
+
+//custom
+#define LOG_IDET_MSG 132
+struct log_IDET_s {
+
+	bool InRe;
+
+};
+
+#define LOG_ICHR_MSG 133
+struct log_ICHR_s {
+
+	float FI1;
+	float FI2;
+	float FI3;
+	float FI4;
+	float FO;
+	float WN1;
+	float WN2;
+	float WN3;
+	float Acc1;
+	float Acc2;
+	float Acc3;
+	bool ARC;
+};
+
+#define LOG_IRST_MSG 134
+struct log_IRST_s {
+
+	uint8_t RS;
+	bool IRes;
+};
+
+#define LOG_RCTR_MSG 135
+struct log_RCTR_s {
+
+	float qE1;
+	float qE2;
+	float qE3;
+	float qE4;
+	float BD1;
+	float BD2;
+	float BD3;
+};
+
+#define LOG_DEBG_MSG 136
+struct log_DEBG_s {
+	float f1;
+	float f2;
+	float f3;
+	float f4;
+	float f5;
+	float f6;
+	float f7;
+	float f8;
+	float f9;
+	uint8_t i1;
+	uint8_t i2;
+	uint8_t i3;
+	bool b1;
+	bool b2;
+	bool b3;
+};
+
 #pragma pack(pop)
 
 // the lower type of initialisation is not supported in C++
@@ -714,6 +778,15 @@ static const struct log_format_s log_formats[] = {
 	LOG_FORMAT(RPL6, "Qff", "Tasp,inAsp,trAsp"),
 	LOG_FORMAT(LAND, "B", "Landed"),
 	LOG_FORMAT(LOAD, "f", "CPU"),
+
+	//custom
+	//LOG_FORMAT(IDET, "ffffffffffBfMMM","FI1,FI2,FI3,FI4,FO,WN1,WN2,WN3,Acc1,Acc2,Acc3,RS,,IDet,IRes,"),
+	LOG_FORMAT(IDET, "M","InRe"),
+	LOG_FORMAT(ICHR, "fffffffffffM","FI1,FI2,FI3,FI4,FO,WN1,WN2,WN3,Acc1,Acc2,Acc3,ARC"),
+	LOG_FORMAT(IRST, "BM","RS,IRes"),	
+	LOG_FORMAT(RCTR, "fffffff","qE1,qE2,qE3,qE4,BD1,BD2,BD3"),
+	LOG_FORMAT(DEBG, "fffffffffBBBMMM","f1,f2,f3,f4,f5,f6,f7,f8,f9,i1,i2,i3,b1,b2,b3"),
+
 	/* system-level messages, ID >= 0x80 */
 	/* FMT: don't write format of format message, it's useless */
 	LOG_FORMAT(TIME, "Q", "StartTime"),

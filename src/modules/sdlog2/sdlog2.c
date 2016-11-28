@@ -112,6 +112,14 @@
 #include <uORB/topics/commander_state.h>
 #include <uORB/topics/cpuload.h>
 
+//custom
+#include <uORB/topics/impact_detection.h>
+#include <uORB/topics/impact_characterization.h>
+#include <uORB/topics/impact_recovery_stage.h>
+#include <uORB/topics/recovery_control.h>
+#include <uORB/topics/debug.h>
+
+
 #include <systemlib/systemlib.h>
 #include <systemlib/param/param.h>
 #include <systemlib/perf_counter.h>
@@ -1218,6 +1226,13 @@ int sdlog2_thread_main(int argc, char *argv[])
 		struct vehicle_land_detected_s land_detected;
 		struct cpuload_s cpuload;
 		struct vehicle_gps_position_s dual_gps_pos;
+
+		//custom
+		struct impact_detection_s impact_detection;
+		struct impact_characterization_s impact_characterization;
+		struct impact_recovery_stage_s impact_recovery_stage;
+		struct recovery_control_s recovery_control;
+		struct debug_s debug;
 	} buf;
 
 	memset(&buf, 0, sizeof(buf));
@@ -1279,6 +1294,13 @@ int sdlog2_thread_main(int argc, char *argv[])
 			struct log_LAND_s log_LAND;
 			struct log_RPL6_s log_RPL6;
 			struct log_LOAD_s log_LOAD;
+
+			//custom
+			struct log_IDET_s log_IDET;
+			struct log_ICHR_s log_ICHR;
+			struct log_IRST_s log_IRST;
+			struct log_RCTR_s log_RCTR;
+			struct log_DEBG_s log_DEBG;
 		} body;
 	} log_msg = {
 		LOG_PACKET_HEADER_INIT(0)
@@ -1328,6 +1350,13 @@ int sdlog2_thread_main(int argc, char *argv[])
 		int land_detected_sub;
 		int commander_state_sub;
 		int cpuload_sub;
+
+		//custom
+		int impact_detection_sub;
+		int impact_characterization_sub;
+		int impact_recovery_stage_sub;
+		int recovery_control_sub;
+		int debug_sub;
 	} subs;
 
 	subs.cmd_sub = -1;
@@ -1370,6 +1399,13 @@ int sdlog2_thread_main(int argc, char *argv[])
 	subs.land_detected_sub = -1;
 	subs.commander_state_sub = -1;
 	subs.cpuload_sub = -1;
+
+	//custom
+	subs.impact_detection_sub = -1;
+	subs.impact_characterization_sub = -1;
+	subs.impact_recovery_stage_sub = -1;
+	subs.recovery_control_sub = -1;
+	subs.debug_sub = -1;
 
 	/* add new topics HERE */
 
@@ -2294,6 +2330,69 @@ int sdlog2_thread_main(int argc, char *argv[])
 			log_msg.body.log_LOAD.cpu_load = buf.cpuload.load;
 			LOGBUFFER_WRITE_AND_COUNT(LOAD);
 
+		}
+
+		//custom
+		if(copy_if_updated(ORB_ID(impact_detection), &subs.impact_detection_sub,&buf.impact_detection)) {
+			log_msg.msg_type = LOG_IDET_MSG;
+			log_msg.body.log_IDET.InRe = buf.impact_detection.inRecovery;
+			LOGBUFFER_WRITE_AND_COUNT(IDET);
+		}
+
+		if(copy_if_updated(ORB_ID(impact_characterization), &subs.impact_characterization_sub,&buf.impact_characterization)) {
+			log_msg.msg_type = LOG_ICHR_MSG;
+			log_msg.body.log_ICHR.FI1 = buf.impact_characterization.fuzzyInput[0];
+			log_msg.body.log_ICHR.FI2 = buf.impact_characterization.fuzzyInput[1];
+			log_msg.body.log_ICHR.FI3 = buf.impact_characterization.fuzzyInput[2];
+			log_msg.body.log_ICHR.FI4 = buf.impact_characterization.fuzzyInput[3];
+			log_msg.body.log_ICHR.FO = buf.impact_characterization.fuzzyOutput;
+			log_msg.body.log_ICHR.WN1 = buf.impact_characterization.wallNormal[0];
+			log_msg.body.log_ICHR.WN2 = buf.impact_characterization.wallNormal[1];
+			log_msg.body.log_ICHR.WN3 = buf.impact_characterization.wallNormal[2];
+			log_msg.body.log_ICHR.Acc1 = buf.impact_characterization.accelReference[0];
+			log_msg.body.log_ICHR.Acc2 = buf.impact_characterization.accelReference[1];
+			log_msg.body.log_ICHR.Acc3 = buf.impact_characterization.accelReference[2];
+			log_msg.body.log_ICHR.ARC = buf.impact_characterization.accelRefIsComputed;
+			LOGBUFFER_WRITE_AND_COUNT(ICHR);
+		}
+
+		if(copy_if_updated(ORB_ID(impact_recovery_stage), &subs.impact_recovery_stage_sub,&buf.impact_recovery_stage)) {
+			log_msg.msg_type = LOG_IRST_MSG;
+			log_msg.body.log_IRST.RS = buf.impact_recovery_stage.recoveryStage;
+			log_msg.body.log_IRST.IRes = buf.impact_recovery_stage.recoveryIsReset;
+			LOGBUFFER_WRITE_AND_COUNT(IRST);
+		}
+
+		if(copy_if_updated(ORB_ID(recovery_control), &subs.recovery_control_sub,&buf.recovery_control)) {
+			log_msg.msg_type = LOG_RCTR_MSG;
+			log_msg.body.log_RCTR.qE1 = buf.recovery_control.quatError[0];
+			log_msg.body.log_RCTR.qE2 = buf.recovery_control.quatError[1];
+			log_msg.body.log_RCTR.qE3 = buf.recovery_control.quatError[2];
+			log_msg.body.log_RCTR.qE4 = buf.recovery_control.quatError[3];
+			log_msg.body.log_RCTR.BD1 = buf.recovery_control.bodyRatesDesired[0];
+			log_msg.body.log_RCTR.BD2 = buf.recovery_control.bodyRatesDesired[1];
+			log_msg.body.log_RCTR.BD3 = buf.recovery_control.bodyRatesDesired[2];
+			LOGBUFFER_WRITE_AND_COUNT(RCTR);
+		}
+
+		if(copy_if_updated(ORB_ID(debug), &subs.debug_sub,&buf.debug)) {
+			log_msg.msg_type = LOG_DEBG_MSG;
+			log_msg.body.log_DEBG.f1 = buf.debug.floats[0];
+			log_msg.body.log_DEBG.f2 = buf.debug.floats[1];
+			log_msg.body.log_DEBG.f3=  buf.debug.floats[2];
+			log_msg.body.log_DEBG.f4 = buf.debug.floats[3];
+			log_msg.body.log_DEBG.f5 = buf.debug.floats[4];
+			log_msg.body.log_DEBG.f6 = buf.debug.floats[5];
+			log_msg.body.log_DEBG.f7 = buf.debug.floats[6];
+			log_msg.body.log_DEBG.f8 = buf.debug.floats[7];
+			log_msg.body.log_DEBG.f9 = buf.debug.floats[8];
+			log_msg.body.log_DEBG.i1 = buf.debug.integer[0];
+			log_msg.body.log_DEBG.i2 = buf.debug.integer[1];
+			log_msg.body.log_DEBG.i3 = buf.debug.integer[2];
+			log_msg.body.log_DEBG.b1 = buf.debug.boolean[0];
+			log_msg.body.log_DEBG.b2 = buf.debug.boolean[1];
+			log_msg.body.log_DEBG.b3 = buf.debug.boolean[2];
+			LOGBUFFER_WRITE_AND_COUNT(DEBG);
 		}
 
 		pthread_mutex_lock(&logbuffer_mutex);

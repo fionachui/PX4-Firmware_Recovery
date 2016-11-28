@@ -88,7 +88,8 @@
 #include <lib/mathlib/mathlib.h>
 #include <lib/geo/geo.h>
 #include <lib/tailsitter_recovery/tailsitter_recovery.h>
-//custom	
+//custom
+#include <uORB/topics/sensor_accel.h>		
 #include <uORB/topics/impact_recovery_stage.h>		
 #include <uORB/topics/impact_characterization.h>		
 #include <uORB/topics/recovery_control.h>
@@ -146,18 +147,20 @@ private:
 	int		_vehicle_status_sub;	/**< vehicle status subscription */
 	int 	_motor_limits_sub;		/**< motor limits subscription */
 
-	//custom	
+	//custom
+	int 	_sensor_accel_sub;		
 	int 	_recovery_stage_sub;		
 	int 	_characterization_sub;
 
 	orb_advert_t	_v_rates_sp_pub;		/**< rate setpoint publication */
 	orb_advert_t	_actuators_0_pub;		/**< attitude actuator controls publication */
 	orb_advert_t	_controller_status_pub;	/**< controller status publication */
-	//custom
 	orb_advert_t	_recovery_control_pub;	
 
 	orb_id_t _rates_sp_id;	/**< pointer to correct rates setpoint uORB metadata structure */
 	orb_id_t _actuators_id;	/**< pointer to correct actuator controls0 uORB metadata structure */
+
+	//custom
 
 	bool		_actuators_0_circuit_breaker_enabled;	/**< circuit breaker to suppress output */
 
@@ -172,10 +175,11 @@ private:
 	struct multirotor_motor_limits_s	_motor_limits;		/**< motor limits */
 	struct mc_att_ctrl_status_s 		_controller_status; /**< controller status */
 
-	//custom	
+	//custom
+	struct sensor_accel_s               _sensor_accel;		
 	struct impact_recovery_stage_s 	    _recovery_stage;		
 	struct impact_characterization_s    _characterization;		
-	struct recovery_control_s           _recovery_control;
+	struct recovery_control_s 	    _recovery_control;
 
 	perf_counter_t	_loop_perf;			/**< loop performance counter */
 	perf_counter_t	_controller_latency_perf;
@@ -302,8 +306,11 @@ private:
 	 */
 	void		vehicle_motor_limits_poll();
 
-	//custom
 	/**
+	 * Check for accelerometer sensor data.
+	 */
+	void 		sensor_accel_poll();		
+	/* 		
 	 * Check for impact detection and characterization updates		
 	 */		
 	void 		impact_poll();		
@@ -338,7 +345,8 @@ MulticopterAttitudeControl::MulticopterAttitudeControl() :
 	_manual_control_sp_sub(-1),
 	_armed_sub(-1),
 	_vehicle_status_sub(-1),
-	//custom	
+	//custom
+	_sensor_accel_sub(-1),		
 	_recovery_stage_sub(-1),		
 	_characterization_sub(-1),
 
@@ -369,10 +377,12 @@ MulticopterAttitudeControl::MulticopterAttitudeControl() :
 	memset(&_vehicle_status, 0, sizeof(_vehicle_status));
 	memset(&_motor_limits, 0, sizeof(_motor_limits));
 	memset(&_controller_status, 0, sizeof(_controller_status));
-	//custom	
+	//custom
+	memset(&_sensor_accel, 0, sizeof(_sensor_accel));		
 	memset(&_recovery_stage_sub, 0, sizeof(_recovery_stage_sub));		
 	memset(&_characterization_sub, 0, sizeof(_characterization_sub));		
 	memset(&_recovery_control, 0, sizeof(_recovery_control));
+
 	_vehicle_status.is_rotary_wing = true;
 
 	_params.att_p.zero();
@@ -465,6 +475,7 @@ MulticopterAttitudeControl::~MulticopterAttitudeControl()
 			}
 		} while (_control_task != -1);
 	}
+
 	if (_ts_opt_recovery != nullptr) {
 		delete _ts_opt_recovery;
 	}
@@ -673,6 +684,22 @@ MulticopterAttitudeControl::vehicle_motor_limits_poll()
 	}
 }
 
+/**
+ * Attitude controller.
+ * Input: 'vehicle_attitude_setpoint' topics (depending on mode)
+ * Output: '_rates_sp' vector, '_thrust_sp'
+ */
+
+void		
+MulticopterAttitudeControl::sensor_accel_poll()		
+{		
+	bool updated;		
+	orb_check(_sensor_accel_sub, &updated);		
+	if (updated){		
+		orb_copy(ORB_ID(sensor_accel), _sensor_accel_sub, &_sensor_accel);		
+	}		
+}	
+
 void		
 MulticopterAttitudeControl::impact_poll()		
 {		
@@ -682,44 +709,44 @@ MulticopterAttitudeControl::impact_poll()
 	orb_check(_characterization_sub, &updated_characterization);		
 	if (updated_recovery_stage){		
 		orb_copy(ORB_ID(impact_recovery_stage), _recovery_stage_sub, &_recovery_stage);	
-		//PX4_WARN("Yea, it's copying\n");	
+		PX4_WARN("Yea, it's copying\n");	
 	}		
 	if (updated_characterization){		
 		orb_copy(ORB_ID(impact_characterization), _characterization_sub, &_characterization);		
 	}		
 }
 
-/**
- * Attitude controller.
- * Input: 'vehicle_attitude_setpoint' topics (depending on mode)
- * Output: '_rates_sp' vector, '_thrust_sp'
- */
 void
 MulticopterAttitudeControl::control_attitude(float dt)
 {
 	vehicle_attitude_setpoint_poll();
+	math::Vector<3> accelReference(_characterization.accelReference[0],_characterization.accelReference[1], _characterization.accelReference[2]);
 
-	//PX4_WARN("%u\n",_recovery_stage.recoveryStage);
+	float HOVER_THRUST = 0.33f;//param_find("HOVER_THRUST");
+	PX4_WARN("%u\n",_recovery_stage.recoveryStage);
 
-	if (_recovery_stage.recoveryStage > 0) {
-		PX4_WARN("RECOVERY STAGE NOT ZERO: %u \n",_recovery_stage.recoveryStage);
+	if(_recovery_stage.recoveryStage == 0){
+		_thrust_sp = _v_att_sp.thrust;//normal control
+	}
+	else if(_recovery_stage.recoveryStage == 1){
+		_thrust_sp = HOVER_THRUST; // set to hover thrust for initial recovery stage
+	}
+	else if(_recovery_stage.recoveryStage == 2){
+		_thrust_sp = _v_att_sp.thrust;//set thrust to altitude w/ zero setpoint
+		accelReference.zero();
+	}    		
+    else if(_recovery_stage.recoveryStage == 3){
+		_thrust_sp = _v_att_sp.thrust;//don't change anything, check for stable vertical velocity
+		accelReference.zero();
+	}
+	else{
+		//PX4_WARN("Something is terribly wrong.");
+	}
 
-		math::Vector<3> accelReference(_characterization.accelReference[0],_characterization.accelReference[1], _characterization.accelReference[2]);
-		float HOVER_THRUST = 0.24f;//param_find("HOVER_THRUST");
+	math::Quaternion attitudeQuaternion(_ctrl_state.q[0], _ctrl_state.q[1], _ctrl_state.q[2], _ctrl_state.q[3]);
 
-		if(_recovery_stage.recoveryStage == 1){
-			_thrust_sp = HOVER_THRUST; // set to hover thrust for initial recovery stage
-		}
-		else if(_recovery_stage.recoveryStage == 2){
-			_thrust_sp = HOVER_THRUST;
-			//_thrust_sp = _v_att_sp.thrust;//set thrust to altitude w/ zero setpoint
-			accelReference.zero();
-		}    		
-		else{
-			PX4_WARN("Something is terribly wrong.");
-		}
-
-		math::Quaternion attitudeQuaternion(_ctrl_state.q[0], _ctrl_state.q[1], _ctrl_state.q[2], _ctrl_state.q[3]);
+	if(_recovery_stage.recoveryStage > 0){ // execute recovery control
+		math::Vector<3> eulerAngles = attitudeQuaternion.to_euler();
 		
 		math::Vector<3> rates; // these are the measured body rates
 		rates(0) = _ctrl_state.roll_rate;
@@ -771,15 +798,14 @@ MulticopterAttitudeControl::control_attitude(float dt)
 		_recovery_control.bodyRatesDesired[0] = bodyRate_P_Desired;
 		_recovery_control.bodyRatesDesired[1] = bodyRate_Q_Desired;
 		_recovery_control.bodyRatesDesired[2] = bodyRate_R_Desired;
-
-	}
-	else{
-		_thrust_sp = _v_att_sp.thrust;
-
+	} 
+	else{ 
 		/* construct attitude setpoint rotation matrix */
+		//math::Quaternion q_sp(_v_att_sp.q_d[0], _v_att_sp.q_d[1], _v_att_sp.q_d[2], _v_att_sp.q_d[3]);
+		//math::Matrix<3, 3> R_sp = q_sp.to_dcm();
 		math::Matrix<3, 3> R_sp;
 		R_sp.set(_v_att_sp.R_body);
-
+		
 		/* get current rotation matrix from control state quaternions */
 		math::Quaternion q_att(_ctrl_state.q[0], _ctrl_state.q[1], _ctrl_state.q[2], _ctrl_state.q[3]);
 		math::Matrix<3, 3> R = q_att.to_dcm();
@@ -882,50 +908,47 @@ void
 MulticopterAttitudeControl::control_attitude_rates(float dt)
 {
 
-	/* reset integral if disarmed */
+	// this unwinds the integral gain for PID control
+	/* update integral only if not saturated on low limit and if motor commands are not saturated */
+
 	if (!_armed.armed || !_vehicle_status.is_rotary_wing) {
 		_rates_int.zero();
 	}
 
-	/* current body angular rates */
-	math::Vector<3> rates;
-	rates(0) = _ctrl_state.roll_rate;
-	rates(1) = _ctrl_state.pitch_rate;
-	rates(2) = _ctrl_state.yaw_rate;
+	if(_armed.armed){
+		math::Vector<3> rates(_ctrl_state.roll_rate,_ctrl_state.pitch_rate,_ctrl_state.yaw_rate); // these are the measured body rates
 
-	math::Vector<3> recovery_scale_D;
-	recovery_scale_D(0) = 1.2f;
-	recovery_scale_D(1) = 1.2f;
-	recovery_scale_D(2) = 1.0f;
+		math::Vector<3> rates_err = _rates_sp - rates;
 
-	/* angular rates error */
-	math::Vector<3> rates_err = _rates_sp - rates;
+		// recovery body rate control is PD only
+		if(_recovery_stage.recoveryStage > 0){
+			_att_control = _params.rate_p.emult(rates_err) + _params.rate_d.emult(_rates_prev - rates) / dt;
+		}
+		else{ // do PID (not sure if we need this, but it might stabilize the control)
+			_att_control = _params.rate_p.emult(rates_err) + _params.rate_d.emult(_rates_prev - rates) / dt + _rates_int;
+		}
+		_rates_sp_prev = _rates_sp;
+		_rates_prev = rates;
 
-	if(_recovery_stage.recoveryStage > 0){
-		_att_control = _params.rate_p.emult(rates_err) + recovery_scale_D.emult(_params.rate_d.emult(_rates_prev - rates)) / dt;
-	} else {
-		_att_control = _params.rate_p.emult(rates_err) + _params.rate_d.emult(_rates_prev - rates) / dt + _rates_int + _params.rate_ff.emult(_rates_sp - _rates_sp_prev) / dt;
-    }
 
-	_rates_sp_prev = _rates_sp;
-	_rates_prev = rates;
+		if (_thrust_sp > MIN_TAKEOFF_THRUST && !_motor_limits.lower_limit && !_motor_limits.upper_limit) {
+			for (int i = AXIS_INDEX_ROLL; i < AXIS_COUNT; i++) {
+				if (fabsf(_att_control(i)) < _thrust_sp) {
+					float rate_i = _rates_int(i) + _params.rate_i(i) * rates_err(i) * dt;
 
-	/* update integral only if not saturated on low limit and if motor commands are not saturated */
-	if (_thrust_sp > MIN_TAKEOFF_THRUST && !_motor_limits.lower_limit && !_motor_limits.upper_limit) {
-		for (int i = AXIS_INDEX_ROLL; i < AXIS_COUNT; i++) {
-			if (fabsf(_att_control(i)) < _thrust_sp) {
-				float rate_i = _rates_int(i) + _params.rate_i(i) * rates_err(i) * dt;
-
-				if (PX4_ISFINITE(rate_i) && rate_i > -RATES_I_LIMIT && rate_i < RATES_I_LIMIT &&
-				    _att_control(i) > -RATES_I_LIMIT && _att_control(i) < RATES_I_LIMIT &&
-				    /* if the axis is the yaw axis, do not update the integral if the limit is hit */
-				    !((i == AXIS_INDEX_YAW) && _motor_limits.yaw)) {
-					_rates_int(i) = rate_i;
+					if (PX4_ISFINITE(rate_i) && rate_i > -RATES_I_LIMIT && rate_i < RATES_I_LIMIT &&
+					    _att_control(i) > -RATES_I_LIMIT && _att_control(i) < RATES_I_LIMIT &&
+					    /* if the axis is the yaw axis, do not update the integral if the limit is hit */
+					    !((i == AXIS_INDEX_YAW) && _motor_limits.yaw)) {
+						_rates_int(i) = rate_i;
+					}
 				}
 			}
 		}
 	}
-
+	else{ //don't give moments if disarmed, redundent
+		_att_control.zero();
+	}
 }
 
 void
@@ -951,7 +974,7 @@ MulticopterAttitudeControl::task_main()
 	_vehicle_status_sub = orb_subscribe(ORB_ID(vehicle_status));
 	_motor_limits_sub = orb_subscribe(ORB_ID(multirotor_motor_limits));
 
-	//custom
+    _sensor_accel_sub = orb_subscribe(ORB_ID(sensor_accel));
     _recovery_stage_sub = orb_subscribe(ORB_ID(impact_recovery_stage));
     _characterization_sub = orb_subscribe(ORB_ID(impact_characterization));
 
@@ -1008,7 +1031,7 @@ MulticopterAttitudeControl::task_main()
 			vehicle_manual_poll();
 			vehicle_status_poll();
 			vehicle_motor_limits_poll();
-			//custom
+			sensor_accel_poll();
 			impact_poll();
 
 			/* Check if we are in rattitude mode and the pilot is above the threshold on pitch
@@ -1098,6 +1121,7 @@ MulticopterAttitudeControl::task_main()
 				_actuators.control[1] = (PX4_ISFINITE(_att_control(1))) ? _att_control(1) : 0.0f;
 				_actuators.control[2] = (PX4_ISFINITE(_att_control(2))) ? _att_control(2) : 0.0f;
 				_actuators.control[3] = (PX4_ISFINITE(_thrust_sp)) ? _thrust_sp : 0.0f;
+
 				_actuators.timestamp = hrt_absolute_time();
 				_actuators.timestamp_sample = _ctrl_state.timestamp;
 

@@ -104,7 +104,6 @@
 #include <uORB/topics/vehicle_land_detected.h>
 #include <uORB/topics/vehicle_local_position.h>
 #include <uORB/topics/vtol_vehicle_status.h>
-#include <uORB/topics/impact_recovery_stage.h>
 #include <uORB/uORB.h>
 
 /* oddly, ERROR is not defined for c++ */
@@ -204,10 +203,6 @@ static uint64_t rc_signal_lost_timestamp;		// Time at which the RC reception was
 static float avionics_power_rail_voltage;		// voltage of the avionics power rail
 
 static bool can_arm_without_gps = false;
-
-//custom
-struct impact_recovery_stage_s _recovery;
-bool overrideOffboard = false;
 
 
 /**
@@ -1502,10 +1497,6 @@ int commander_thread_main(int argc, char *argv[])
 	memset(&vtol_status, 0, sizeof(vtol_status));
 	vtol_status.vtol_in_rw_mode = true;		//default for vtol is rotary wing
 
-	//custom
-	int recovery_stage_sub = orb_subscribe(ORB_ID(impact_recovery_stage));
-	memset(&_recovery, 0, sizeof(_recovery));
-
 	int cpuload_sub = orb_subscribe(ORB_ID(cpuload));
 	memset(&cpuload, 0, sizeof(cpuload));
 
@@ -2255,12 +2246,6 @@ int commander_thread_main(int argc, char *argv[])
 			orb_copy(ORB_ID(geofence_result), geofence_result_sub, &geofence_result);
 		}
 
-		//custom
-		orb_check(recovery_stage_sub, &updated);
-		if (updated) {
-			orb_copy(ORB_ID(impact_recovery_stage), recovery_stage_sub, &_recovery);
-		}
-
 		// Geofence actions
 		if (armed.armed && (geofence_result.geofence_action != geofence_result_s::GF_ACTION_NONE)) {
 
@@ -2782,18 +2767,8 @@ int commander_thread_main(int argc, char *argv[])
 			main_state_changed = false;
 		}
 
-		if (_recovery.recoveryStage > 0){
-			status_changed = true;
-		}
-
 		/* publish states (armed, control mode, vehicle status) at least with 5 Hz */
-
-		//custom: changed mod constant from 200000 to 100000 so checks @ 10 Hz
-		if (counter % (100000 / COMMANDER_MONITORING_INTERVAL) == 0 || status_changed || _recovery.recoveryStage > 0) {
-			
-			if (_recovery.recoveryStage > 0){
-				overrideOffboard = true;
-			}
+		if (counter % (200000 / COMMANDER_MONITORING_INTERVAL) == 0 || status_changed) {
 			set_control_mode();
 			control_mode.timestamp = now;
 			orb_publish(ORB_ID(vehicle_control_mode), control_mode_pub, &control_mode);
@@ -3375,7 +3350,6 @@ set_control_mode()
 
 	switch (status.nav_state) {
 	case vehicle_status_s::NAVIGATION_STATE_MANUAL:
-		overrideOffboard = false;
 		control_mode.flag_control_manual_enabled = true;
 		control_mode.flag_control_auto_enabled = false;
 		control_mode.flag_control_rates_enabled = stabilization_required();
@@ -3434,38 +3408,17 @@ set_control_mode()
 		break;
 
 	case vehicle_status_s::NAVIGATION_STATE_POSCTL:
-		//custom
-		if (_recovery.recoveryStage > 0){
-			overrideOffboard = true;
-		}
-
-		if (overrideOffboard) {
-			control_mode.flag_control_offboard_enabled = false; //redundant
-			control_mode.flag_control_manual_enabled = true;
-			control_mode.flag_control_auto_enabled = false;
-			control_mode.flag_control_rates_enabled = true;
-			control_mode.flag_control_attitude_enabled = true;
-			control_mode.flag_control_rattitude_enabled = false;
-			control_mode.flag_control_altitude_enabled = true;
-			control_mode.flag_control_climb_rate_enabled = true;
-			control_mode.flag_control_position_enabled = false;
-			control_mode.flag_control_velocity_enabled = false;
-			control_mode.flag_control_acceleration_enabled = false;
-			control_mode.flag_control_termination_enabled = false;
-		} else {
-			//original 
-			control_mode.flag_control_manual_enabled = true;
-			control_mode.flag_control_auto_enabled = false;
-			control_mode.flag_control_rates_enabled = true;
-			control_mode.flag_control_attitude_enabled = true;
-			control_mode.flag_control_rattitude_enabled = false;
-			control_mode.flag_control_altitude_enabled = true;
-			control_mode.flag_control_climb_rate_enabled = true;
-			control_mode.flag_control_position_enabled = !status.in_transition_mode;
-			control_mode.flag_control_velocity_enabled = !status.in_transition_mode;
-			control_mode.flag_control_acceleration_enabled = false;
-			control_mode.flag_control_termination_enabled = false;
-		}
+		control_mode.flag_control_manual_enabled = true;
+		control_mode.flag_control_auto_enabled = false;
+		control_mode.flag_control_rates_enabled = true;
+		control_mode.flag_control_attitude_enabled = true;
+		control_mode.flag_control_rattitude_enabled = false;
+		control_mode.flag_control_altitude_enabled = true;
+		control_mode.flag_control_climb_rate_enabled = true;
+		control_mode.flag_control_position_enabled = !status.in_transition_mode;
+		control_mode.flag_control_velocity_enabled = !status.in_transition_mode;
+		control_mode.flag_control_acceleration_enabled = false;
+		control_mode.flag_control_termination_enabled = false;
 		break;
 
 	case vehicle_status_s::NAVIGATION_STATE_AUTO_RTL:
@@ -3552,64 +3505,43 @@ set_control_mode()
 		break;
 
 	case vehicle_status_s::NAVIGATION_STATE_OFFBOARD:
+		control_mode.flag_control_manual_enabled = false;
+		control_mode.flag_control_auto_enabled = false;
+		control_mode.flag_control_offboard_enabled = true;
 
+		/*
+		 * The control flags depend on what is ignored according to the offboard control mode topic
+		 * Inner loop flags (e.g. attitude) also depend on outer loop ignore flags (e.g. position)
+		 */
+		control_mode.flag_control_rates_enabled = !offboard_control_mode.ignore_bodyrate ||
+			!offboard_control_mode.ignore_attitude ||
+			!offboard_control_mode.ignore_position ||
+			!offboard_control_mode.ignore_velocity ||
+			!offboard_control_mode.ignore_acceleration_force;
 
-		//custom
-		if (_recovery.recoveryStage > 0){
-			overrideOffboard = true;
-		}
+		control_mode.flag_control_attitude_enabled = !offboard_control_mode.ignore_attitude ||
+			!offboard_control_mode.ignore_position ||
+			!offboard_control_mode.ignore_velocity ||
+			!offboard_control_mode.ignore_acceleration_force;
 
-		if (overrideOffboard) {
-			control_mode.flag_control_offboard_enabled = false; //redundant
-			control_mode.flag_control_manual_enabled = true;
-			control_mode.flag_control_auto_enabled = false;
-			control_mode.flag_control_rates_enabled = true;
-			control_mode.flag_control_attitude_enabled = true;
-			control_mode.flag_control_rattitude_enabled = false;
-			control_mode.flag_control_altitude_enabled = true;
-			control_mode.flag_control_climb_rate_enabled = true;
-			control_mode.flag_control_position_enabled = false;
-			control_mode.flag_control_velocity_enabled = false;
-			control_mode.flag_control_acceleration_enabled = false;
-			control_mode.flag_control_termination_enabled = false;
-		} else {
-			control_mode.flag_control_manual_enabled = false;
-			control_mode.flag_control_auto_enabled = false;
-			control_mode.flag_control_offboard_enabled = true;
-			/*
-			 * The control flags depend on what is ignored according to the offboard control mode topic
-			 * Inner loop flags (e.g. attitude) also depend on outer loop ignore flags (e.g. position)
-			 */
-			control_mode.flag_control_rates_enabled = !offboard_control_mode.ignore_bodyrate ||
-				!offboard_control_mode.ignore_attitude ||
-				!offboard_control_mode.ignore_position ||
-				!offboard_control_mode.ignore_velocity ||
-				!offboard_control_mode.ignore_acceleration_force;
+		control_mode.flag_control_rattitude_enabled = false;
 
-			control_mode.flag_control_attitude_enabled = !offboard_control_mode.ignore_attitude ||
-				!offboard_control_mode.ignore_position ||
-				!offboard_control_mode.ignore_velocity ||
-				!offboard_control_mode.ignore_acceleration_force;
+		control_mode.flag_control_acceleration_enabled = !offboard_control_mode.ignore_acceleration_force &&
+		  !status.in_transition_mode;
 
-			control_mode.flag_control_rattitude_enabled = false;
+		control_mode.flag_control_velocity_enabled = (!offboard_control_mode.ignore_velocity ||
+			!offboard_control_mode.ignore_position) && !status.in_transition_mode &&
+			!control_mode.flag_control_acceleration_enabled;
 
-			control_mode.flag_control_acceleration_enabled = !offboard_control_mode.ignore_acceleration_force &&
-			  !status.in_transition_mode;
+		control_mode.flag_control_climb_rate_enabled = (!offboard_control_mode.ignore_velocity ||
+			!offboard_control_mode.ignore_position) && !control_mode.flag_control_acceleration_enabled;
 
-			control_mode.flag_control_velocity_enabled = (!offboard_control_mode.ignore_velocity ||
-				!offboard_control_mode.ignore_position) && !status.in_transition_mode &&
-				!control_mode.flag_control_acceleration_enabled;
+		control_mode.flag_control_position_enabled = !offboard_control_mode.ignore_position && !status.in_transition_mode &&
+		  !control_mode.flag_control_acceleration_enabled;
 
-			control_mode.flag_control_climb_rate_enabled = (!offboard_control_mode.ignore_velocity ||
-				!offboard_control_mode.ignore_position) && !control_mode.flag_control_acceleration_enabled;
+		control_mode.flag_control_altitude_enabled = (!offboard_control_mode.ignore_velocity ||
+			!offboard_control_mode.ignore_position) && !control_mode.flag_control_acceleration_enabled;
 
-			control_mode.flag_control_position_enabled = !offboard_control_mode.ignore_position && !status.in_transition_mode &&
-			  !control_mode.flag_control_acceleration_enabled;
-
-			control_mode.flag_control_altitude_enabled = (!offboard_control_mode.ignore_velocity ||
-				!offboard_control_mode.ignore_position) && !control_mode.flag_control_acceleration_enabled;
-		}
-		
 		break;
 
 	default:
